@@ -684,22 +684,22 @@ def get_spending_summary_tool(user_id: str, days: int = 30) -> str:
             })
         
         # Calculate totals
-        total_expense = spending_df['amount'].sum()
-        by_category = spending_df.groupby('category')['amount'].sum().to_dict()
+        total_expense = float(spending_df['amount'].sum())
+        by_category = {k: float(v) for k, v in by_category_raw.items()}
         
-        net_savings = income_summary['total_income'] - total_expense
-        saving_rate = (net_savings / income_summary['total_income'] * 100) if income_summary['total_income'] > 0 else 0
+        net_savings = float(income_summary['total_income'] - total_expense)
+        saving_rate = (net_savings / income_summary['total_income'] * 100) if income_summary['total_income'] > 0 else 0.0
         
         summary = {
-            "period_days": days,
-            "total_income": round(income_summary['total_income'], 2),
-            "total_expense": round(total_expense, 2),
-            "net_savings": round(net_savings, 2),
-            "saving_rate": round(saving_rate, 2),
+            "period_days": int(days),
+            "total_income": float(round(income_summary['total_income'], 2)),
+            "total_expense": float(round(total_expense, 2)),
+            "net_savings": float(round(net_savings, 2)),
+            "saving_rate": float(round(saving_rate, 2)),
             "by_category": {k: round(v, 2) for k, v in by_category.items()},
-            "days_worked": income_summary['days_worked'],
-            "avg_daily_income": round(income_summary['avg_daily'], 2),
-            "avg_daily_expense": round(total_expense / days, 2)
+            "days_worked": int(income_summary['days_worked']),
+            "avg_daily_income": float(round(income_summary['avg_daily'], 2)),
+            "avg_daily_expense": float(round(total_expense / days, 2))
         }
         
         return json.dumps(summary, indent=2)
@@ -709,85 +709,65 @@ def get_spending_summary_tool(user_id: str, days: int = 30) -> str:
 
 
 @tool
-def get_spending_warnings_tool(user_id: str, days: int = 30) -> str:
+def get_spending_summary_tool(user_id: str, days: int = 30) -> str:
     """
-    Analyze spending patterns and generate warnings with actionable advice.
-    
-    Args:
-        user_id: User identifier
-        days: Analysis period in days
-    
-    Returns:
-        JSON with warnings, advice, and detailed analysis
+    Get comprehensive spending summary for a user.
     """
     try:
-        summary_str = get_spending_summary_tool.entrypoint(user_id, days)
-        summary = json.loads(summary_str)
+        # Get income summary
+        income_summary = storage.get_income_summary(user_id, days)
         
-        warnings = []
-        advice = []
+        # Get spending summary
+        spending_df = storage.get_spending_history(user_id, days)
         
-        income = summary['total_income']
-        expense = summary['total_expense']
-        saving_rate = summary['saving_rate']
-        by_cat = summary['by_category']
+        if spending_df.empty:
+            return json.dumps({
+                "period_days": int(days),
+                "total_income": float(income_summary['total_income']),
+                "total_expense": 0.0,
+                "net_savings": float(income_summary['total_income']),
+                "saving_rate": 100.0,
+                "by_category": {},
+                "message": "No expenses recorded yet."
+            })
         
-        # Warning 1: Spending exceeds income
-        if income == 0 and expense > 0:
-            warnings.append("⚠️ You have expenses but no recorded income this period.")
-            advice.append("Start logging your daily earnings to track your financial health.")
-        elif expense > income:
-            deficit = expense - income
-            warnings.append(f"🔴 CRITICAL: Spending ₹{deficit:.0f} more than earning!")
-            advice.append(f"Cut expenses by at least ₹{deficit/30:.0f}/day to balance your budget.")
+        # --- FIX: TYPE CONVERSION FOR JSON SERIALIZATION ---
         
-        # Warning 2: Low savings rate
-        if income > 0 and saving_rate < 10:
-            warnings.append(f"💰 Low saving rate: Only {saving_rate:.1f}% saved")
-            advice.append("Target: Save at least 15-20% of income. Start with ₹50/day challenge!")
-        elif income > 0 and saving_rate < 0:
-            warnings.append("🔴 DEFICIT: You're not saving, you're losing money!")
-            advice.append("Emergency action needed: Identify top 3 expenses to cut immediately.")
+        # 1. Calculate Total Expense (Convert numpy.float to python float)
+        total_expense = float(spending_df['amount'].sum())
         
-        # Warning 3: Category overspending
-        if expense > 0:
-            for cat, amt in sorted(by_cat.items(), key=lambda x: x[1], reverse=True):
-                share = amt / expense * 100
-                
-                if cat == 'food' and share > 40:
-                    warnings.append(f"🍽️ Food spending is {share:.1f}% of expenses (₹{amt:.0f})")
-                    advice.append("Cook at home 3 days/week = Save ₹1,500/month. Pack lunch instead of ordering.")
-                
-                elif cat == 'entertainment' and share > 20:
-                    warnings.append(f"🎮 Entertainment: {share:.1f}% (₹{amt:.0f})")
-                    advice.append("Reduce to ₹500/month. Free alternatives: YouTube, local parks, meetups.")
-                
-                elif cat == 'fuel' and amt > (income * 0.3):
-                    warnings.append(f"⛽ High fuel costs: ₹{amt:.0f} ({share:.1f}%)")
-                    advice.append("Optimize routes, maintain vehicle, consider CNG conversion.")
+        # 2. Calculate Category Breakdown (Force conversion to dict, then float values)
+        # .to_dict() ensures 'by_category_raw' is a Python Dictionary, which has .items()
+        by_category_raw = spending_df.groupby('category')['amount'].sum().to_dict()
+        by_category = {str(k): float(v) for k, v in by_category_raw.items()}
         
-        # Warning 4: Gig worker specific - Income volatility
-        if summary.get('days_worked', 0) < (days * 0.7):
-            warnings.append(f"📉 Low activity: Only {summary.get('days_worked', 0)} working days")
-            advice.append("Aim for 25+ days/month. Check platform incentives and surge times.")
+        # 3. Calculate Derived Metrics
+        total_income = float(income_summary['total_income'])
+        net_savings = total_income - total_expense
         
-        # Positive reinforcement
-        if not warnings:
-            advice.append("✅ Great job! Your spending is under control. Keep it up! 💪")
-        
-        result = {
-            "period_days": days,
-            "warnings": warnings,
-            "advice": advice,
-            "summary": summary,
-            "urgency_level": "HIGH" if expense > income else "MEDIUM" if saving_rate < 10 else "LOW"
+        if total_income > 0:
+            saving_rate = (net_savings / total_income) * 100
+        else:
+            saving_rate = 0.0
+            
+        summary = {
+            "period_days": int(days),
+            "total_income": round(total_income, 2),
+            "total_expense": round(total_expense, 2),
+            "net_savings": round(net_savings, 2),
+            "saving_rate": round(saving_rate, 2),
+            "by_category": {k: round(v, 2) for k, v in by_category.items()},
+            "days_worked": int(income_summary.get('days_worked', 0)),
+            "avg_daily_income": float(income_summary.get('avg_daily', 0)),
+            "avg_daily_expense": round(total_expense / days, 2)
         }
         
-        return json.dumps(result, indent=2)
+        return json.dumps(summary, indent=2)
     
     except Exception as e:
+        # Print error to console for debugging
+        print(f"DEBUG ERROR in get_spending_summary_tool: {str(e)}")
         return json.dumps({"error": str(e)})
-
 
 @tool
 def list_recent_transactions_tool(user_id: str, days: int = 7, kind: str = None) -> str:
