@@ -10,5 +10,17 @@
     "is_festival": false,
     "is_weekend": false,
     "recorded_at": "2025-11-26T23:17:59.778501"
+  },
+  {
+    "date": "2025-11-29",
+    "income": 600.0,
+    "hours_worked": 8,
+    "orders_completed": 0,
+    "platform": "Manual Entry",
+    "efficiency": 0,
+    "weather": "clear",
+    "is_festival": false,
+    "is_weekend": true,
+    "recorded_at": "2025-11-29T01:08:42.340077"
   }
 ]

@@ -521,6 +521,7 @@ import plotly.express as px
 import pandas as pd
 import sys
 import os
+import json
 from datetime import datetime, timedelta
 
 # Add parent directory to path FIRST
@@ -532,6 +533,17 @@ if parent_dir not in sys.path:
 from data.storage import UserStorage
 from data.simulator import GigWorkerSimulator
 from agents.orchestrator_agent import OrchestratorAgent
+
+
+# Add near other imports at top of file
+import base64
+from io import BytesIO
+from PIL import Image
+from pdf2image import convert_from_bytes
+
+# Import your screenshot analyzer tool (adjust path if needed)
+# from .agents/financial_coach_agent import analyze_screenshot_tool
+from agents.financial_coach_agent import analyze_screenshot_tool
 
 # Page configuration
 st.set_page_config(
@@ -545,6 +557,35 @@ st.set_page_config(
 storage = UserStorage()
 
 # ==================== UI STYLING & THEME ====================
+
+def _file_to_b64(file_bytes: bytes, mime: str) -> str:
+    b64 = base64.b64encode(file_bytes).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+def analyze_image_bytes(user_id: str, img_bytes: bytes, filename: str = None):
+    """Send a single image (bytes) to analyze_screenshot_tool via base64 string."""
+    mime = "image/png"
+    b64 = _file_to_b64(img_bytes, mime)
+    # Call the tool entrypoint (this will attempt to save to storage inside the tool)
+    resp_json = analyze_screenshot_tool.entrypoint(user_id, image_b64=b64, filename=filename)
+    try:
+        return json.loads(resp_json)
+    except Exception:
+        return {"raw": resp_json}
+
+def analyze_pdf_bytes(user_id: str, pdf_bytes: bytes, filename_prefix: str = None):
+    """Convert PDF to images and analyze each page. Returns list of page-results."""
+    pages = convert_from_bytes(pdf_bytes, dpi=200)  # adjust dpi if needed
+    results = []
+    for i, page in enumerate(pages, start=1):
+        buff = BytesIO()
+        page.save(buff, format="PNG")
+        img_bytes = buff.getvalue()
+        fname = f"{(filename_prefix or 'upload')}_page_{i}.png"
+        r = analyze_image_bytes(user_id, img_bytes, filename=fname)
+        results.append({"page": i, "filename": fname, "result": r})
+    return results
+
 
 def apply_custom_styles():
     st.markdown("""
@@ -1052,40 +1093,96 @@ def show_main_app():
                         """, unsafe_allow_html=True)
                 else:
                     st.success("✅ No urgent risks detected!")
-    # TAB 2: AI COACH
+       # TAB 2: AI COACH
     with tab2:
-        st.markdown("### 💬 Chat with StormGuard")
-        
-        # Chat container style
-        st.markdown("""
-        <style>
-            .stChatMessage {
-                background-color: white;
-                border-radius: 15px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-                margin-bottom: 10px;
-            }
-        </style>
-        """, unsafe_allow_html=True)
+        st.markdown("### 💬 Chat with StormGuard — Upload or Ask in the same place")
 
+        # Render existing chat history (if any)
         for chat in st.session_state.get('chat_history', []):
             with st.chat_message("user", avatar="👤"):
                 st.markdown(chat['question'])
             with st.chat_message("assistant", avatar="🌦️"):
                 st.markdown(chat['answer'])
-        
-        user_q = st.chat_input("Ask about savings, shifts, or spending...")
-        if user_q:
-            with st.chat_message("user", avatar="👤"):
-                st.markdown(user_q)
-            with st.chat_message("assistant", avatar="🌦️"):
-                with st.spinner("Thinking..."):
-                    try:
-                        response = orchestrator.chat(user_q)
+
+        # Two-column input area: left = text chat input, right = compact uploader
+        col_text, col_upload = st.columns([3, 1])
+
+        # ---------- Text input (left) ----------
+        with col_text:
+            user_q = st.chat_input("Ask about savings, shifts, or spending... (or attach a file on the right)")
+            if user_q:
+                # append user message placeholder to history and call orchestrator
+                st.session_state.chat_history.append({'question': user_q, 'answer': None})
+                with st.chat_message("user", avatar="👤"):
+                    st.markdown(user_q)
+                with st.chat_message("assistant", avatar="🌦️"):
+                    with st.spinner("Thinking..."):
+                        try:
+                            response = orchestrator.chat(user_q)
+                        except Exception as e:
+                            response = f"Agent error: {e}"
                         st.markdown(response)
-                        st.session_state.chat_history.append({'question': user_q, 'answer': response})
-                    except Exception as e:
-                        st.error(f"Agent error: {e}")
+                        # update last placeholder entry
+                        for h in reversed(st.session_state.chat_history):
+                            if h['answer'] is None and h['question'] == user_q:
+                                h['answer'] = response
+                                break
+
+        # ---------- File uploader (right) ----------
+        with col_upload:
+            st.markdown("**📎 Upload**")
+            uploaded_file = st.file_uploader("", type=["png", "jpg", "jpeg", "pdf"],
+                                             accept_multiple_files=False, key="coach_uploader")
+            if uploaded_file is not None:
+                filename = uploaded_file.name
+                file_bytes = uploaded_file.read()
+                file_type = uploaded_file.type
+
+                # preview (images only)
+                if file_type.startswith('image'):
+                    try:
+                        img = Image.open(BytesIO(file_bytes)).convert("RGB")
+                        st.image(img, caption=filename, use_column_width=True)
+                    except Exception:
+                        st.write("(Preview unavailable)")
+                else:
+                    st.write(f"Uploaded: {filename} (PDF)")
+
+                # Analyze & attach the analysis as an assistant message
+                if st.button("Analyze & Attach", key=f"analyze_{filename}"):
+                    with st.spinner("Analyzing upload..."):
+                        try:
+                            if file_type == "application/pdf":
+                                page_results = analyze_pdf_bytes(
+                                    st.session_state.user_id,
+                                    file_bytes,
+                                    filename_prefix=os.path.splitext(filename)[0]
+                                )
+                                # Build a short multi-page summary
+                                summary_lines = [f'PDF "{filename}" — {len(page_results)} page(s) analyzed.']
+                                for p in page_results:
+                                    features = p.get('result', {}) if isinstance(p, dict) else {}
+                                    summary_lines.append(
+                                        f"Page {p['page']}: OCR blocks={features.get('ocr_blocks_count','N/A')} | saved={features.get('save_message','No')}"
+                                    )
+                                assistant_msg = "\n".join(summary_lines)
+                            else:
+                                # image
+                                resp = analyze_image_bytes(st.session_state.user_id, file_bytes, filename=filename)
+                                assistant_msg = (
+                                    f'Image "{filename}" analyzed — OCR blocks: {resp.get("ocr_blocks_count","N/A")}\n'
+                                    f'Saved: {resp.get("save_message","No")}'
+                                )
+                        except Exception as e:
+                            assistant_msg = f"Analysis failed: {e}"
+
+                    # Append to chat history as assistant response to an implicit user upload action
+                    upload_question = f"[Uploaded file] {filename}"
+                    st.session_state.chat_history.append({'question': upload_question, 'answer': assistant_msg})
+
+                    # Rerender to show the newly appended chat message immediately
+                    st.rerun()
+
 
     # TAB 3: DATA
     with tab3:
