@@ -1,0 +1,11 @@
+streamlit
+plotly
+pandas
+numpy
+phidata
+google-generativeai
+python-dotenv
+Pillow
+pytesseract
+pdf2image
+groq
