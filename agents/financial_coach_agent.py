@@ -490,7 +490,7 @@ import re
 import pytesseract
 
 load_dotenv()
-# os.environ["GOOGLE_API_KEY"] = "AIzaSyBKD2IslrgfUhBBHCpW1Uu4ZYV0EEWMwVY"
+
 os.getenv("GOOGLE_API_KEY")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
