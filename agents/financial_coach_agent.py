@@ -804,7 +804,7 @@ class FinancialCoachAgent:
         
         print(f"✅ Enhanced Financial Coach Agent initialized for {user_profile['name']}")
     
-    def analyze_spending_patterns(self):
+    def analyze_spending_patterns(self, current_monthly_income=0):
         """
         Analyze spending data to identify patterns and issues
         Uses both DataFrame analysis and tool-based analysis
@@ -844,7 +844,21 @@ class FinancialCoachAgent:
             weekend_avg = df[df['is_weekend']]['amount'].mean()
             weekday_avg = df[~df['is_weekend']]['amount'].mean()
             weekend_spike = ((weekend_avg - weekday_avg) / weekday_avg) * 100 if weekday_avg > 0 else 0
-            
+            fuel_spend = df[df['category'] == 'fuel']['amount'].sum()
+        fuel_risk = {}
+        
+        if current_monthly_income > 0:
+            fuel_ratio = (fuel_spend / current_monthly_income) * 100
+            # If fuel is >25% of income, it indicates inefficiency (poor routing/maintenance)
+            if fuel_ratio > 25:
+                fuel_risk = {
+                    'detected': True,
+                    'spend': round(fuel_spend, 2),
+                    'ratio': round(fuel_ratio, 1),
+                    'message': "High fuel spend detected. Check vehicle maintenance or route efficiency."
+                }
+            else:
+                fuel_risk = {'detected': False, 'ratio': round(fuel_ratio, 1)}
             patterns = {
                 'total_spent': summary.get('total_expense', 0), # Use .get() for safety
                 'daily_average': summary.get('avg_daily_expense', 0),
@@ -858,6 +872,7 @@ class FinancialCoachAgent:
                     'change_percent': round(velocity_change, 1),
                     'trend': 'increasing' if velocity_change > 10 else 'decreasing' if velocity_change < -10 else 'stable'
                 },
+                'fuel_efficiency': fuel_risk,
                 'weekend_pattern': {
                     'weekend_avg': round(weekend_avg, 2),
                     'weekday_avg': round(weekday_avg, 2),
@@ -885,6 +900,7 @@ class FinancialCoachAgent:
                     'change_percent': 0,
                     'trend': 'stable'
                 },
+                'fuel_efficiency': fuel_risk,
                 'weekend_pattern': {
                     'weekend_avg': 0,
                     'weekday_avg': 0,
@@ -976,6 +992,19 @@ Warn {self.profile['name']} proactively (in Hinglish):
 4. One income-boosting tip
 
 Make them feel in control. Under 130 words.
+""",
+            'fuel_inefficiency': f"""
+🚨 Behavioral Alert: High Fuel Spending!
+
+Context: {context_data}
+
+Warn {self.profile['name']} (in Hinglish):
+1. Fuel costs are {context_data.get('ratio')}% of income (High!).
+2. This suggests inefficient routing or bike maintenance issues.
+3. Suggest checking tire pressure or using route optimization.
+4. Calculate potential savings if reduced to 15%.
+
+Be direct but helpful. Under 100 words.
 """,
             
             'overspending_detected': f"""

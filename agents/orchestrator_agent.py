@@ -73,7 +73,8 @@ class OrchestratorAgent:
         print("📊 Step 1: Getting income forecast...")
         forecast_report = self.weather_agent.generate_complete_forecast(7)
         print(f"   ✅ Weekly forecast: ₹{forecast_report['predictions']['weekly_total']:.0f}")
-        
+        monthly_income_est = forecast_report['predictions']['weekly_total'] * 4
+
         # Step 2: Analyze spending patterns
         print("\n💸 Step 2: Analyzing spending...")
         spending_patterns = self.coach_agent.analyze_spending_patterns()
@@ -189,15 +190,54 @@ class OrchestratorAgent:
     def _check_and_prioritize_interventions(self, forecast_report, spending_patterns):
         """
         Intelligent intervention decision-making
-        Prioritizes: URGENT → HIGH → MEDIUM → LOW
+        Prioritizes: URGENT (0) → HIGH (1) → MEDIUM (2) → LOW (3/4)
         """
         interventions = []
         
         # Get risks from Weather Agent
         risks = forecast_report.get('risks', [])
         
-        # Check 1: HIGH SEVERITY RISKS (Immediate action needed)
-        high_risks = [r for r in risks if r['severity'] == 'HIGH']
+        # ==============================================================================
+        # NEW: 1. PROACTIVE INTERVENTION: Bridging the Gap (Priority 0 - Highest)
+        # ==============================================================================
+        crunch_risks = [r for r in risks if r['type'] == 'Cash Crunch Prediction']
+        for risk in crunch_risks:
+            # Fetch real-time opportunity to bridge the specific gap
+            opportunities = self.scout_agent.scan_real_time_opportunities()
+            best_opp = opportunities[0] if opportunities else {'zones': ['Central Area'], 'expected_earnings': 'standard rates'}
+            
+            # Extract zone name cleanly
+            zone_name = best_opp.get('zones', ['your area'])[0] if isinstance(best_opp.get('zones'), list) else best_opp.get('zones', 'your area')
+            
+            # Calculate hours needed (Conservative estimate: ₹100/hr)
+            shortfall = risk['shortfall_amount']
+            hourly_rate = 100 
+            hours_needed = max(2, int(shortfall / hourly_rate))
+            
+            # Construct the Specific Intervention Message
+            message = (
+                f"🚨 **Action Required:** Your {risk['bill_name']} is due in {risk['due_date']} days, "
+                f"and you are projected to be short by ₹{shortfall:.0f}.\n\n"
+                f"⚡ **Solution:** Demand is high in **{zone_name}** tonight. "
+                f"Recommend logging in for **{hours_needed} hours** to bridge the gap."
+            )
+            
+            interventions.append({
+                'type': 'proactive_intervention',
+                'priority': 0, # Top Priority (Critical)
+                'severity': 'HIGH',
+                'category': 'Cash Crunch Intervention',
+                'message': message,
+                'action_required': True,
+                'timeline': 'Tonight',
+                'source': 'orchestrator_ai'
+            })
+
+        # ==============================================================================
+        # EXISTING: 2. HIGH SEVERITY RISKS (Immediate action needed) (Priority 1)
+        # ==============================================================================
+        # Filter out 'Cash Crunch Prediction' here since we handled it above specially
+        high_risks = [r for r in risks if r['severity'] == 'HIGH' and r['type'] != 'Cash Crunch Prediction']
         for risk in high_risks:
             warning = self.coach_agent.generate_proactive_warning(
                 'slow_week_ahead',
@@ -210,7 +250,7 @@ class OrchestratorAgent:
             
             interventions.append({
                 'type': 'urgent_risk_warning',
-                'priority': 1,  # Highest priority
+                'priority': 1,
                 'severity': 'HIGH',
                 'category': risk['type'],
                 'message': warning,
@@ -219,9 +259,31 @@ class OrchestratorAgent:
                 'source': 'weather_agent'
             })
         
-        # Check 2: OVERSPENDING DETECTION (Behavioral issue)
-        velocity = spending_patterns['spending_velocity']
-        if velocity['trend'] == 'increasing' and abs(velocity['change_percent']) > 15:
+        # ==============================================================================
+        # NEW: 3. BEHAVIORAL NUDGING: Fuel Efficiency (Priority 2)
+        # ==============================================================================
+        fuel_data = spending_patterns.get('fuel_efficiency', {})
+        if fuel_data.get('detected'):
+            warning = self.coach_agent.generate_proactive_warning(
+                'fuel_inefficiency',
+                fuel_data
+            )
+            interventions.append({
+                'type': 'behavioral_nudge',
+                'priority': 2,
+                'severity': 'MEDIUM',
+                'category': 'Inefficient Spending',
+                'message': warning,
+                'action_required': True,
+                'timeline': 'This Week',
+                'source': 'coach_agent'
+            })
+
+        # ==============================================================================
+        # EXISTING: 4. OVERSPENDING DETECTION (Behavioral issue) (Priority 2)
+        # ==============================================================================
+        velocity = spending_patterns.get('spending_velocity', {})
+        if velocity.get('trend') == 'increasing' and abs(velocity.get('change_percent', 0)) > 15:
             warning = self.coach_agent.generate_proactive_warning(
                 'overspending_detected',
                 {
@@ -233,7 +295,7 @@ class OrchestratorAgent:
             
             interventions.append({
                 'type': 'spending_alert',
-                'priority': 2,  # High priority
+                'priority': 2,
                 'severity': 'MEDIUM',
                 'category': 'Overspending Pattern',
                 'message': warning,
@@ -242,8 +304,10 @@ class OrchestratorAgent:
                 'source': 'coach_agent'
             })
         
-        # Check 3: WEEKEND OVERSPENDING PATTERN
-        if spending_patterns['weekend_pattern']['significant']:
+        # ==============================================================================
+        # EXISTING: 5. WEEKEND OVERSPENDING PATTERN (Priority 3)
+        # ==============================================================================
+        if spending_patterns.get('weekend_pattern', {}).get('significant'):
             warning = self.coach_agent.generate_proactive_warning(
                 'weekend_overspending',
                 spending_patterns['weekend_pattern']
@@ -251,7 +315,7 @@ class OrchestratorAgent:
             
             interventions.append({
                 'type': 'behavioral_pattern',
-                'priority': 3,  # Medium priority
+                'priority': 3,
                 'severity': 'LOW',
                 'category': 'Weekend Spending Pattern',
                 'message': warning,
@@ -260,11 +324,14 @@ class OrchestratorAgent:
                 'source': 'coach_agent'
             })
         
-        # Check 4: LOW INCOME WEEK (Without crisis)
+        # ==============================================================================
+        # EXISTING: 6. LOW INCOME WEEK (Without crisis) (Priority 3)
+        # ==============================================================================
         predicted_income = forecast_report['predictions']['weekly_total']
         avg_income = forecast_report['patterns']['overall']['avg_daily_income'] * 7
         
-        if predicted_income < avg_income * 0.85 and not high_risks:
+        # Only add if we haven't already added high risks
+        if predicted_income < avg_income * 0.85 and not high_risks and not crunch_risks:
             interventions.append({
                 'type': 'income_alert',
                 'priority': 3,
@@ -276,8 +343,9 @@ class OrchestratorAgent:
                 'source': 'weather_agent'
             })
         
-        # Check 5: GOAL PROGRESS CHECK (Monthly)
-        # Simplified for demo - in production, check actual goal progress
+        # ==============================================================================
+        # EXISTING: 7. GOAL PROGRESS CHECK (Monthly) (Priority 4)
+        # ==============================================================================
         if datetime.now().day == 1:  # First of month
             interventions.append({
                 'type': 'goal_reminder',
@@ -290,7 +358,7 @@ class OrchestratorAgent:
                 'source': 'orchestrator'
             })
         
-        # Sort by priority (1 = highest)
+        # Sort by priority (0 = highest)
         interventions.sort(key=lambda x: x['priority'])
         
         # Limit to top 3 to avoid overwhelming user

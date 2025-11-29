@@ -213,9 +213,9 @@ class WeatherForecastAgent:
         
         return patterns
     
-    def identify_risks(self, predictions, upcoming_bills=14000):
+    def identify_risks(self, predictions, upcoming_bills=None):
         """
-        Identify financial risks from predictions
+        Identify financial risks with precise bill tracking
         """
         print("⚠️  Analyzing financial risks...")
         
@@ -223,24 +223,34 @@ class WeatherForecastAgent:
         weekly_income = predictions['weekly_total']
         daily_predictions = predictions['predictions']
         
-        # Risk 1: Cash flow crisis
-        if weekly_income < upcoming_bills * 0.9:
-            shortfall = upcoming_bills - weekly_income
-            extra_hours = round(shortfall / 60)  # Assuming ₹60/hour avg
+        # Default bills if none provided (Fallback)
+        if upcoming_bills is None:
+            upcoming_bills = [
+                {'name': 'Rent', 'amount': 8000, 'due_in_days': 5},
+                {'name': 'Insurance', 'amount': 1500, 'due_in_days': 3}
+            ]
+
+        # Risk 1: Precise Cash Crunch Prediction
+        total_bills_due = sum(b['amount'] for b in upcoming_bills if b['due_in_days'] <= 7)
+        # Assume 30% of income goes to daily subsistence (food/fuel) before bills
+        available_cash = weekly_income * 0.70 
+        
+        if available_cash < total_bills_due:
+            shortfall = total_bills_due - available_cash
+            urgent_bill = min(upcoming_bills, key=lambda x: x['due_in_days'])
             
             risks.append({
-                'type': 'Cash Flow Crisis',
+                'type': 'Cash Crunch Prediction',
                 'severity': 'HIGH',
-                'probability': 0.85,
-                'timeline': '7 days',
+                'probability': 0.9,
+                'timeline': f"{urgent_bill['due_in_days']} days",
                 'shortfall_amount': round(shortfall, 2),
-                'current_forecast': weekly_income,
-                'required_amount': upcoming_bills,
-                'mitigation_strategies': [
-                    f"Work {extra_hours} extra hours this week",
-                    "Request peer pool payout if eligible (₹5,000-15,000)",
-                    "Negotiate 5-day rent extension with landlord",
-                    "Take high-value orders only (₹40+ per order)"
+                'bill_name': urgent_bill['name'],
+                'due_date': urgent_bill['due_in_days'],
+                'impact': f"Missed {urgent_bill['name']} payment",
+                'recommendations': [
+                    "Target high-demand zones immediately",
+                    "Extend shift by 2-3 hours",
                 ]
             })
         
