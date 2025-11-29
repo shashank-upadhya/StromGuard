@@ -418,5 +418,11 @@
     "category": "fuel",
     "description": "Petrol/Diesel",
     "recorded_at": "2025-11-21T23:22:09.989089"
+  },
+  {
+    "date": "2025-11-29",
+    "amount": 5000,
+    "category": "fuel",
+    "recorded_at": "2025-11-29T03:33:59.876085"
   }
 ]

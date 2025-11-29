@@ -521,7 +521,6 @@ import plotly.express as px
 import pandas as pd
 import sys
 import os
-import math
 from datetime import datetime, timedelta
 
 # Add parent directory to path FIRST
@@ -533,6 +532,17 @@ if parent_dir not in sys.path:
 from data.storage import UserStorage
 from data.simulator import GigWorkerSimulator
 from agents.orchestrator_agent import OrchestratorAgent
+
+
+# Add near other imports at top of file
+import base64
+from io import BytesIO
+from PIL import Image
+from pdf2image import convert_from_bytes
+
+# Import your screenshot analyzer tool (adjust path if needed)
+# from .agents/financial_coach_agent import analyze_screenshot_tool
+from agents.financial_coach_agent import analyze_screenshot_tool
 
 # Page configuration
 st.set_page_config(
@@ -546,6 +556,35 @@ st.set_page_config(
 storage = UserStorage()
 
 # ==================== UI STYLING & THEME ====================
+
+def _file_to_b64(file_bytes: bytes, mime: str) -> str:
+    b64 = base64.b64encode(file_bytes).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+def analyze_image_bytes(user_id: str, img_bytes: bytes, filename: str = None):
+    """Send a single image (bytes) to analyze_screenshot_tool via base64 string."""
+    mime = "image/png"
+    b64 = _file_to_b64(img_bytes, mime)
+    # Call the tool entrypoint (this will attempt to save to storage inside the tool)
+    resp_json = analyze_screenshot_tool.entrypoint(user_id, image_b64=b64, filename=filename)
+    try:
+        return json.loads(resp_json)
+    except Exception:
+        return {"raw": resp_json}
+
+def analyze_pdf_bytes(user_id: str, pdf_bytes: bytes, filename_prefix: str = None):
+    """Convert PDF to images and analyze each page. Returns list of page-results."""
+    pages = convert_from_bytes(pdf_bytes, dpi=200)  # adjust dpi if needed
+    results = []
+    for i, page in enumerate(pages, start=1):
+        buff = BytesIO()
+        page.save(buff, format="PNG")
+        img_bytes = buff.getvalue()
+        fname = f"{(filename_prefix or 'upload')}_page_{i}.png"
+        r = analyze_image_bytes(user_id, img_bytes, filename=fname)
+        results.append({"page": i, "filename": fname, "result": r})
+    return results
+
 
 def apply_custom_styles():
     st.markdown("""
@@ -826,22 +865,41 @@ def show_main_app():
                             <div><b>{alert['category']}</b><br>{alert['message']}</div>
                         </div>""", unsafe_allow_html=True)
                 else:
-                    st.success("All clear! ✅")
-        else:
-            st.info("👈 Click **'Daily Check'** in sidebar to analyze your finances.")
-
-    # --- TAB 2: COACH ---
+                    st.success("✅ No urgent risks detected!")
+    # TAB 2: AI COACH
     with tab2:
-        for c in st.session_state.chat_history:
-            st.chat_message("user").write(c['question'])
-            st.chat_message("assistant").write(c['answer'])
-            
-        q = st.chat_input("Ask me anything...")
-        if q:
-            st.chat_message("user").write(q)
-            resp = orchestrator.chat(q)
-            st.chat_message("assistant").write(resp)
-            st.session_state.chat_history.append({'question': q, 'answer': resp})
+        st.markdown("### 💬 Chat with StormGuard")
+        
+        # Chat container style
+        st.markdown("""
+        <style>
+            .stChatMessage {
+                background-color: white;
+                border-radius: 15px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+                margin-bottom: 10px;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
+        for chat in st.session_state.get('chat_history', []):
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(chat['question'])
+            with st.chat_message("assistant", avatar="🌦️"):
+                st.markdown(chat['answer'])
+        
+        user_q = st.chat_input("Ask about savings, shifts, or spending...")
+        if user_q:
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(user_q)
+            with st.chat_message("assistant", avatar="🌦️"):
+                with st.spinner("Thinking..."):
+                    try:
+                        response = orchestrator.chat(user_q)
+                        st.markdown(response)
+                        st.session_state.chat_history.append({'question': user_q, 'answer': response})
+                    except Exception as e:
+                        st.error(f"Agent error: {e}")
 
     # --- TAB 3: TRENDS ---
     with tab3:
