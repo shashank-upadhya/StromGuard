@@ -483,6 +483,11 @@ import sys
 import os
 import json
 from dotenv import load_dotenv
+import base64
+from io import BytesIO
+from PIL import Image
+import re
+import pytesseract
 
 load_dotenv()
 
@@ -498,7 +503,101 @@ from data.storage import UserStorage
 storage = UserStorage()
 
 
-# ==================== PHI TOOLS FOR TRANSACTION TRACKING ====================
+# -------------------- Screenshot analysis helpers --------------------
+def _pil_from_b64(b64_string: str) -> Image.Image:
+    """Decode base64 image to PIL Image."""
+    try:
+        header_removed = b64_string.split(",", 1)[1] if "," in b64_string else b64_string
+    except Exception:
+        header_removed = b64_string
+    data = base64.b64decode(header_removed)
+    return Image.open(BytesIO(data)).convert("RGB")
+
+
+def _preprocess_for_ocr(pil_img: Image.Image) -> Image.Image:
+    """Simple preprocessing: resize if large and convert to grayscale."""
+    if pil_img.width > 2000:
+        pil_img = pil_img.resize((int(pil_img.width * 0.8), int(pil_img.height * 0.8)))
+    return pil_img.convert("L")
+
+
+def _run_ocr(pil_img: Image.Image) -> dict:
+    """Run pytesseract and return data dict (same shape as pytesseract Output.DICT)."""
+    return pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT)
+
+
+def _blocks_from_ocr(ocr: dict) -> list:
+    blocks = []
+    n = len(ocr.get("text", []))
+    for i in range(n):
+        txt = str(ocr["text"][i]).strip()
+        if not txt:
+            continue
+        left, top, w, h = ocr["left"][i], ocr["top"][i], ocr["width"][i], ocr["height"][i]
+        try:
+            conf = float(ocr["conf"][i])
+        except Exception:
+            conf = -1
+        blocks.append({"text": txt, "bbox": [left, top, w, h], "conf": conf})
+    return blocks
+
+
+def _find_currency_numbers(blocks: list) -> list:
+    currency_re = re.compile(r'[₹Rs\$]?\s*([0-9,]+(?:\.[0-9]+)?)')
+    nums = []
+    for b in blocks:
+        m = currency_re.search(b["text"])
+        if m:
+            val = m.group(1).replace(",", "")
+            try:
+                nums.append((b, float(val)))
+            except ValueError:
+                pass
+    return nums
+
+
+def _infer_features_from_blocks(blocks: list) -> dict:
+    """Naive heuristics to extract common dashboard fields: earnings, orders, incentives, rating, hours."""
+    features = {}
+    text_join = " ".join([b["text"] for b in blocks]).lower()
+
+    # Today earnings
+    for b, val in _find_currency_numbers(blocks):
+        if "today" in b["text"].lower() or "today" in text_join:
+            features["today_earnings"] = val
+            break
+
+    # orders, incentives, completed orders, rating, hours
+    for b in blocks:
+        t = b["text"].lower()
+
+        if re.search(r"\border(s)?\b", t) and re.search(r"\d+", t):
+            num = int(re.search(r"(\d+)", t).group(1))
+            features.setdefault("orders_today", num)
+
+        if "incent" in t and re.search(r"\d+", t):
+            features["incentives"] = int(re.search(r"(\d+)", t).group(1))
+
+        if "completed" in t and re.search(r"\d+", t):
+            features["completed_orders"] = int(re.search(r"(\d+)", t).group(1))
+
+        if "rating" in t and re.search(r"(\d+(?:\.\d+)?)", t):
+            features["rating"] = float(re.search(r"(\d+(?:\.\d+)?)", t).group(1))
+
+        if "h" in t and "m" in t and re.search(r"\d+h\s*\d+m", t):
+            features["online_hours"] = re.search(r"(\d+h\s*\d+m)", t).group(1)
+
+    # fallback for rating (standalone number 0-5)
+    if "rating" not in features:
+        for b in blocks:
+            if re.fullmatch(r"[0-5](?:\.\d+)?", b["text"]):
+                features["rating"] = float(b["text"])
+                break
+
+    return features
+
+
+# -------------------- PHI TOOLS FOR TRANSACTION TRACKING --------------------
 
 @tool
 def add_transaction_tool(
@@ -744,6 +843,94 @@ def list_recent_transactions_tool(user_id: str, days: int = 7, kind: str = None)
         return json.dumps({"error": str(e)})
 
 
+# -------------------- New TOOL: Analyze screenshot and save features --------------------
+@tool
+def analyze_screenshot_tool(user_id: str, image_b64: str = None, image_path: str = None, filename: str = None) -> str:
+    """
+    Analyze a dashboard screenshot (Swiggy/Zomato style) and extract structured features.
+    Accepts either a base64 image string (image_b64) or a local image_path.
+
+    It will attempt to extract:
+      - today_earnings (₹)
+      - orders_today
+      - incentives
+      - completed_orders
+      - online_hours (e.g., '42h 10m')
+      - rating (0-5)
+      - raw OCR data
+
+    The extracted features will be saved to storage using a best-effort method. If your
+    UserStorage class exposes a method like `save_screenshot_features` or `add_screenshot`,
+    this code will call it. If not, it will try to save a JSON record via `storage.add_misc`
+    or fallback to writing a local file (see comments further below).
+
+    Returns a JSON string containing extracted features and save status.
+    """
+    try:
+        if not image_b64 and not image_path:
+            return json.dumps({"error": "Provide image_b64 or image_path"})
+
+        # Load image
+        if image_b64:
+            pil_img = _pil_from_b64(image_b64)
+            filename = filename or f"screenshot_{user_id}_{int(datetime.now().timestamp())}.png"
+        else:
+            pil_img = Image.open(image_path).convert("RGB")
+            filename = filename or os.path.basename(image_path)
+
+        # OCR
+        gray = _preprocess_for_ocr(pil_img)
+        ocr = _run_ocr(gray)
+        blocks = _blocks_from_ocr(ocr)
+        features = _infer_features_from_blocks(blocks)
+
+        record = {
+            'user_id': user_id,
+            'filename': filename,
+            'uploaded_at': datetime.now().isoformat(),
+            'features': features,
+            'ocr_raw': ocr
+        }
+
+        saved = False
+        save_msg = ""
+
+        # Try common storage API names (best-effort). Adjust to match your UserStorage implementation.
+        if hasattr(storage, 'save_screenshot_features'):
+            storage.save_screenshot_features(user_id, record)
+            saved = True
+            save_msg = 'saved using save_screenshot_features()'
+        elif hasattr(storage, 'add_screenshot'):
+            storage.add_screenshot(user_id, record)
+            saved = True
+            save_msg = 'saved using add_screenshot()'
+        elif hasattr(storage, 'add_misc'):
+            # generic storage method: store under a misc key
+            storage.add_misc(user_id, 'screenshot', record)
+            saved = True
+            save_msg = 'saved using add_misc()'
+        else:
+            # Fallback: write JSON locally to app_data/snapshots
+            out_dir = os.path.join(os.getcwd(), 'app_data', 'snapshots')
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{filename}.json")
+            with open(out_path, 'w', encoding='utf-8') as f:
+                json.dump(record, f, ensure_ascii=False, indent=2)
+            saved = True
+            save_msg = f'saved locally to {out_path} (storage had no matching API)'
+
+        response = {
+            'status': 'ok' if saved else 'error',
+            'save_message': save_msg,
+            'features': features,
+            'ocr_blocks_count': len(blocks)
+        }
+
+        return json.dumps(response, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 # ==================== ENHANCED FINANCIAL COACH AGENT ====================
 
 class FinancialCoachAgent:
@@ -777,10 +964,11 @@ class FinancialCoachAgent:
                 add_transaction_tool,
                 get_spending_summary_tool,
                 get_spending_warnings_tool,
-                list_recent_transactions_tool
+                list_recent_transactions_tool,
+                analyze_screenshot_tool  # expose screenshot analyzer to the agent
             ],
             instructions=[
-                f"You are a caring, empathetic financial coach for {user_profile['name']}.",
+                f"You are a caring, empathetic financial coach for {user_profile['name']}",
                 f"They work as a delivery partner in {user_profile['city']} (Swiggy/Zomato).",
                 "They earn variable income - some weeks good, some weeks bad.",
                 "Speak in Hinglish (Hindi-English mix) - natural and conversational.",
@@ -1148,17 +1336,22 @@ if __name__ == "__main__":
     print("\nUser: I earned 600 from daily delivery")
     response2 = coach.chat("I earned 600 rupees from daily delivery today.")
     print(f"Agent: {response2}")
-    # print("TEST 1: Transaction Logging")
-    # print("-" * 70)
-    # result1 = add_transaction_tool(user_profile['user_id'], 150, 'food', 'expense', description='Lunch at restaurant')
-    # print(result1)
-    
-    # result2 = add_transaction_tool(user_profile['user_id'], 600, 'earnings', 'income', description='Daily delivery')
-    # print(result2)
+
+    # Demonstrate analyze_screenshot_tool usage (sample)
+    print("\nTEST 1b: Screenshot analysis (demo)")
+    try:
+        # If you have a local sample image, provide path here for quick demo
+        sample_path = os.path.join(os.getcwd(), 'sample_dashboard.png')
+        if os.path.exists(sample_path):
+            print("Found sample_dashboard.png, analyzing...")
+            resp = analyze_screenshot_tool.entrypoint(user_profile['user_id'], image_path=sample_path)
+            print(resp)
+        else:
+            print("No local sample image found at", sample_path)
+    except Exception as e:
+        print("Screenshot test failed:", e)
 
 
-
-    # TEST 2: FIX MANUAL CALL
     print("\nTEST 2: Spending Summary")
     print("-" * 70)
     summary = get_spending_summary_tool.entrypoint(user_profile['user_id'], 30)
@@ -1171,18 +1364,3 @@ if __name__ == "__main__":
     print(warnings)
     
     print("\n✅ Enhanced Financial Coach Agent test complete!")
-    
-
-    # # Test spending summary
-    # print("\nTEST 2: Spending Summary")
-    # print("-" * 70)
-    # summary = get_spending_summary_tool(user_profile['user_id'], 30)
-    # print(summary)
-    
-    # # Test spending warnings
-    # print("\nTEST 3: Spending Warnings")
-    # print("-" * 70)
-    # warnings = get_spending_warnings_tool(user_profile['user_id'], 30)
-    # print(warnings)
-    
-    # print("\n✅ Enhanced Financial Coach Agent test complete!")

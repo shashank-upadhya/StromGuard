@@ -47,5 +47,12 @@
     "category": "Food",
     "description": "Lunch at restaurant",
     "recorded_at": "2025-11-28T22:04:28.301019"
+  },
+  {
+    "date": "2025-11-29",
+    "amount": 150.0,
+    "category": "Food",
+    "description": "Lunch at restaurant",
+    "recorded_at": "2025-11-29T01:07:59.607101"
   }
 ]
